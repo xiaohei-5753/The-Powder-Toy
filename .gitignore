@@ -1,0 +1,40 @@
+# Build output
+/build/
+/build_release/
+/build_dist/
+/build*.ninja
+/meson-logs/
+/meson-private/
+*.exe
+*.dll
+
+# Prebuilt subproject contents (re-downloaded by Meson)
+/subprojects/*/
+/subprojects/*.zip
+
+# Keep wrap files
+!/subprojects/*.wrap
+
+# IDE
+.vs/
+.vscode/
+*.sln
+*.vcxproj*
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Compiled resources
+*.o
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.exp
