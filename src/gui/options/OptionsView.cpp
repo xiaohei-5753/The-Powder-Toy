@@ -370,6 +370,14 @@ OptionsView::OptionsView() : ui::Window(ui::Point(-1, -1), ui::Point(320, 340))
 	rayTraceRadius = addTextboxWithPreview("Sample radius", false, [this](String value, bool defocus) {
 		UpdateRayTraceRadius(value, defocus);
 	}).first;
+	addLabel(1, "Barrier batch (lower = less flicker, slower)");
+	rayTraceBarrierBatch = addTextboxWithPreview("Barrier batch", false, [this](String value, bool defocus) {
+		UpdateRayTraceBarrierBatch(value, defocus);
+	}).first;
+	addLabel(1, "Temporal blend (0=off, 0.3=smooth)");
+	rayTraceTemporalBlend = addTextboxWithPreview("Temporal blend", false, [this](String value, bool defocus) {
+		UpdateRayTraceTemporalBlend(value, defocus);
+	}).first;
 	decoSpace = addDropDown("Colour space used by decoration tools", {
 		{ "sRGB", DECOSPACE_SRGB },
 		{ "Linear", DECOSPACE_LINEAR },
@@ -712,6 +720,14 @@ void OptionsView::NotifySettingsChanged(OptionsModel * sender)
 	{
 		rayTraceRadius->SetText(String::Build((int)sender->GetRayTraceCircleRadius()));
 	}
+	if (!rayTraceBarrierBatch->IsFocused())
+	{
+		rayTraceBarrierBatch->SetText(String::Build((int)sender->GetRayTraceBarrierBatch()));
+	}
+	if (!rayTraceTemporalBlend->IsFocused())
+	{
+		rayTraceTemporalBlend->SetText(String::Build(sender->GetRayTraceTemporalBlend()));
+	}
 	momentumScroll->SetChecked(sender->GetMomentumScroll());
 	redirectStd->SetChecked(sender->GetRedirectStd());
 	autoStartupRequest->SetChecked(sender->GetAutoStartupRequest());
@@ -761,6 +777,31 @@ void OptionsView::UpdateRayTraceRadius(String value, bool defocus)
 		rayTraceRadius->SetText(String::Build(rad));
 	}
 	c->SetRayTraceCircleRadius(rad);
+}
+
+void OptionsView::UpdateRayTraceBarrierBatch(String value, bool defocus)
+{
+	String numericsOnly;
+	for (auto ch : value) { if (ch >= U'0' && ch <= U'9') numericsOnly += ch; }
+	if (numericsOnly.empty()) { if (defocus) rayTraceBarrierBatch->SetText(String::Build(16)); return; }
+	int batch = numericsOnly.ToNumber<int>(true);
+	batch = std::clamp(batch, 0, 128);
+	if (defocus) rayTraceBarrierBatch->SetText(String::Build(batch));
+	c->SetRayTraceBarrierBatch(batch);
+}
+
+void OptionsView::UpdateRayTraceTemporalBlend(String value, bool defocus)
+{
+	// Allow floats with decimal point
+	String filtered;
+	for (auto ch : value) {
+		if ((ch >= U'0' && ch <= U'9') || ch == U'.') filtered += ch;
+	}
+	if (filtered.empty()) { if (defocus) rayTraceTemporalBlend->SetText(String::Build(0.0f)); return; }
+	float blend = filtered.ToNumber<float>(true);
+	blend = std::clamp(blend, 0.0f, 1.0f);
+	if (defocus) rayTraceTemporalBlend->SetText(String::Build(blend));
+	c->SetRayTraceTemporalBlend(blend);
 }
 
 void OptionsView::AttachController(OptionsController * c_)

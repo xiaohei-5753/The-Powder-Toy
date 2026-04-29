@@ -41,6 +41,8 @@ struct RendererSettings
 	int rayTraceCircleRadius = 64;
 	float rayTraceSunIntensity = 1.0f;
 	float rayTraceWallIntensity = 0.3f;
+	int rayTraceBarrierBatch = 16;
+	float rayTraceTemporalBlend = 0.0f;
 	int gridSize = 0;
 	float fireIntensity = 1;
 	HdispLimit wantHdispLimitMin = HdispLimitExplicit{ MIN_TEMP };

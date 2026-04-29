@@ -90,5 +90,9 @@ public:
 	void SetRayTraceEnabled(bool state);
 	void SetRayTraceResolution(int resolution);
 	void SetRayTraceCircleRadius(int radius);
+	int GetRayTraceBarrierBatch();
+	float GetRayTraceTemporalBlend();
+	void SetRayTraceBarrierBatch(int batch);
+	void SetRayTraceTemporalBlend(float blend);
 	virtual ~OptionsModel();
 };

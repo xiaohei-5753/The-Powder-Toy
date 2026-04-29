@@ -52,6 +52,8 @@ public:
 	void SetRayTraceEnabled(bool state);
 	void SetRayTraceResolution(int resolution);
 	void SetRayTraceCircleRadius(int radius);
+	void SetRayTraceBarrierBatch(int batch);
+	void SetRayTraceTemporalBlend(float blend);
 	
 	void Exit();
 	OptionsView * GetView();

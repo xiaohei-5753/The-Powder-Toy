@@ -2215,6 +2215,8 @@ void GameView::OnDraw()
 		raytrace->GetParams().circleRadius = rendererSettings->rayTraceCircleRadius;
 		raytrace->GetParams().sunIntensity = rendererSettings->rayTraceSunIntensity;
 		raytrace->GetParams().wallIntensity = rendererSettings->rayTraceWallIntensity;
+		raytrace->GetParams().barrierBatch = rendererSettings->rayTraceBarrierBatch;
+		raytrace->GetParams().temporalBlend = rendererSettings->rayTraceTemporalBlend;
 
 		// Full pipeline: consume previous async readback → upload → compute → start next readback
 		raytrace->ProcessFrame(g->Data(), WINDOWW, YRES, *sim, *rendererSettings);

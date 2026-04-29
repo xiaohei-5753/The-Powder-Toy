@@ -52,6 +52,8 @@ class OptionsView: public ui::Window
 	ui::Checkbox *rayTraceEnabled{};
 	ui::Textbox *rayTraceResolution{};
 	ui::Textbox *rayTraceRadius{};
+	ui::Textbox *rayTraceBarrierBatch{};
+	ui::Textbox *rayTraceTemporalBlend{};
 	ui::Checkbox *redirectStd{};
 	ui::Checkbox *autoStartupRequest{};
 	ui::Label *startupRequestStatus{};
@@ -69,6 +71,8 @@ class OptionsView: public ui::Window
 	void UpdateStartupRequestStatus();
 	void UpdateRayTraceResolution(String value, bool defocus);
 	void UpdateRayTraceRadius(String value, bool defocus);
+	void UpdateRayTraceBarrierBatch(String value, bool defocus);
+	void UpdateRayTraceTemporalBlend(String value, bool defocus);
 public:
 	OptionsView();
 	void NotifySettingsChanged(OptionsModel * sender);

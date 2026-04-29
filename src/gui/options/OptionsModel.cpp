@@ -450,6 +450,28 @@ void OptionsModel::SetRayTraceCircleRadius(int radius)
 	notifySettingsChanged();
 }
 
+int OptionsModel::GetRayTraceBarrierBatch()
+{
+	return gModel->GetRendererSettings().rayTraceBarrierBatch;
+}
+
+float OptionsModel::GetRayTraceTemporalBlend()
+{
+	return gModel->GetRendererSettings().rayTraceTemporalBlend;
+}
+
+void OptionsModel::SetRayTraceBarrierBatch(int batch)
+{
+	gModel->GetRendererSettings().rayTraceBarrierBatch = batch;
+	notifySettingsChanged();
+}
+
+void OptionsModel::SetRayTraceTemporalBlend(float blend)
+{
+	gModel->GetRendererSettings().rayTraceTemporalBlend = blend;
+	notifySettingsChanged();
+}
+
 void OptionsModel::notifySettingsChanged()
 {
 	for (size_t i = 0; i < observers.size(); i++)

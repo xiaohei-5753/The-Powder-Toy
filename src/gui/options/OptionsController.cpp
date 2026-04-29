@@ -212,6 +212,16 @@ void OptionsController::SetRayTraceCircleRadius(int radius)
 	model->SetRayTraceCircleRadius(radius);
 }
 
+void OptionsController::SetRayTraceBarrierBatch(int batch)
+{
+	model->SetRayTraceBarrierBatch(batch);
+}
+
+void OptionsController::SetRayTraceTemporalBlend(float blend)
+{
+	model->SetRayTraceTemporalBlend(blend);
+}
+
 void OptionsController::Exit()
 {
 	view->CloseActiveWindow();
