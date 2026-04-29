@@ -57,14 +57,12 @@ void main() {
 			vec4 c = texelFetch(u_cc, ivec2(x, y), 0);
 			vec3 e = texelFetch(u_cl, ivec2(x, y), 0).rgb;
 
-			// 1) Accumulate light BEFORE this pixel's emission
-			//    (so each pixel's own glow comes from the blend shader, not double-counted)
+			// Forward propagation: carry emission + colour downstream
+			light = light * (1.0 - c.a) + max(e, c.rgb);
+
+			// Accumulate into scan (emission is now in light, so blend shader does NOT add e again)
 			vec4 prev = imageLoad(u_scan, ivec2(x, y));
 			imageStore(u_scan, ivec2(x, y), prev + vec4(light / float(u_ndirs), 0.0));
-
-			// 2) Then add emission + colour for downstream propagation
-			//    (so light continues past this pixel carrying its contribution)
-			light = light * (1.0 - c.a) + max(e, c.rgb);
 		}
 
 		int e2 = 2 * er;
@@ -91,9 +89,8 @@ void main() {
 	if (p.x >= u_cs.x || p.y >= u_cs.y) return;
 	vec4 c = texelFetch(u_cc, p, 0);
 	if (c.a >= 1.0) { imageStore(u_out, p, c); return; }
-	vec3 e    = texelFetch(u_cl, p, 0).rgb;
 	vec3 scan = texelFetch(u_scan, p, 0).rgb;
-	vec3 result = mix(scan, c.rgb, c.a) + e;
+	vec3 result = mix(scan, c.rgb, c.a);
 	float ov = max(max(result.r, result.g), result.b);
 	if (ov > 1.0) result /= ov;
 	imageStore(u_out, p, vec4(result, 1.0));
