@@ -34,42 +34,40 @@ void main() {
 	int dx = abs(u_dir.x), dy = abs(u_dir.y);
 	int sx = (u_dir.x >= 0) ? 1 : -1, sy = (u_dir.y >= 0) ? 1 : -1;
 	int W = u_cs.x, H = u_cs.y;
+	int r = rayId;
 
-	// Entry point on canvas boundary
-	int x = 0, y = 0, r = rayId;
-	if (dx == 0) {
-		if (sy > 0) { x = r; y = 0;     }
-		else        { x = r; y = H - 1; }
-	} else if (dy == 0) {
-		if (sx > 0) { x = 0;     y = r; }
-		else        { x = W - 1; y = r; }
-	} else if (dx >= dy) {
-		if (r < H) { x = sx > 0 ? 0 : W - 1; y = r; }
-		else       { x = r - H; y = sy > 0 ? 0 : H - 1; }
+	// Single-edge tiling: enter from ONE edge only
+	int x, y;
+	if (dx >= dy) {
+		// Shallow: enter from LEFT (sx>0) or RIGHT (sx<0) vertical edge
+		x = (sx > 0) ? 0 : W - 1;
+		y = -H + r;  // r = 0..2H
 	} else {
-		if (r < W) { x = r; y = sy > 0 ? 0 : H - 1; }
-		else       { x = sx > 0 ? 0 : W - 1; y = r - W; }
+		// Steep: enter from TOP (sy>0) or BOTTOM (sy<0) horizontal edge
+		x = -W + r;  // r = 0..2W
+		y = (sy > 0) ? 0 : H - 1;
 	}
 
 	vec3 light = u_ambient;
-	int er = dx - dy, e2 = 2 * er;
-	if (e2 > -dy) { er -= dy; x += sx; }
-	if (e2 <  dx) { er += dx; y += sy; }
+	int er = dx - dy;
 
-	while (x >= 0 && x < W && y >= 0 && y < H) {
-		vec4 c = texelFetch(u_cc, ivec2(x, y), 0);
-		vec3 e = texelFetch(u_cl, ivec2(x, y), 0).rgb;
+	// Unified march: step unconditionally, process when inside
+	while (true) {
+		if (x >= 0 && x < W && y >= 0 && y < H) {
+			vec4 c = texelFetch(u_cc, ivec2(x, y), 0);
+			vec3 e = texelFetch(u_cl, ivec2(x, y), 0).rgb;
+			light = light * (1.0 - c.a) + e;
 
-		// Forward light: absorb by (1-alpha), add emission
-		light = light * (1.0 - c.a) + e;
+			vec4 prev = imageLoad(u_scan, ivec2(x, y));
+			imageStore(u_scan, ivec2(x, y), prev + vec4(light / float(u_ndirs), 0.0));
+		}
 
-		// Accumulate (normalised by direction count)
-		vec4 prev = imageLoad(u_scan, ivec2(x, y));
-		imageStore(u_scan, ivec2(x, y), prev + vec4(light / float(u_ndirs), 0.0));
-
-		e2 = 2 * er;
+		int e2 = 2 * er;
 		if (e2 > -dy) { er -= dy; x += sx; }
 		if (e2 <  dx) { er += dx; y += sy; }
+
+		if ((sx > 0 && x >= W) || (sx < 0 && x < 0) ||
+		    (sy > 0 && y >= H) || (sy < 0 && y < 0)) break;
 	}
 }
 )";
@@ -775,25 +773,25 @@ void RayTraceRenderer::Render()
 	}
 	int nDirs = (int)dirX.size();
 
-	// Bind scanline shader once
+	// Bind scanline shader once (invariant uniforms set outside loop)
 	glUseProgram(scanProg_);
 	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, cvsColorTex_);
 	glUniform1i(glGetUniformLocation(scanProg_, "u_cc"), 0);
 	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, cvsEmissionTex_);
 	glUniform1i(glGetUniformLocation(scanProg_, "u_cl"), 1);
 	glUniform2i(glGetUniformLocation(scanProg_, "u_cs"), W, H);
+	glUniform3fv(glGetUniformLocation(scanProg_, "u_ambient"), 1, wc);
+	glUniform1i(glGetUniformLocation(scanProg_, "u_ndirs"), nDirs);
 	glBindImageTexture(0, cvsScanTex_, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
 
 	// Dispatch one direction family at a time
-	int nRays = W + H;
 	for (int d = 0; d < nDirs; d++) {
 		int dx = dirX[d], dy = dirY[d];
 		if (dx == 0 && dy == 0) continue;
+		int rc = (abs(dx) >= abs(dy)) ? (2 * H + 1) : (2 * W + 1);
 		glUniform2i(glGetUniformLocation(scanProg_, "u_dir"), dx, dy);
-		glUniform3fv(glGetUniformLocation(scanProg_, "u_ambient"), 1, wc);
-		glUniform1i(glGetUniformLocation(scanProg_, "u_rayCount"), nRays);
-		glUniform1i(glGetUniformLocation(scanProg_, "u_ndirs"), nDirs);
-		glDispatchCompute((nRays + 255) / 256, 1, 1);
+		glUniform1i(glGetUniformLocation(scanProg_, "u_rayCount"), rc);
+		glDispatchCompute((rc + 255) / 256, 1, 1);
 		glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 	}
 
