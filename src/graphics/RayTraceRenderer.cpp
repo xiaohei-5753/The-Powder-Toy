@@ -57,10 +57,14 @@ void main() {
 			vec4 c = texelFetch(u_cc, ivec2(x, y), 0);
 			vec3 e = texelFetch(u_cl, ivec2(x, y), 0).rgb;
 
-			// Forward propagation: carry emission + colour downstream
-			light = light * (1.0 - c.a) + max(e, c.rgb);
+			// Forward light propagation:
+			//   -  (1 - a)  attenuates ambient (opaque blocks all ambient)
+			//   -  e        carries self-emission
+			//   -  c.rgb * (1 - a) carries pixel colour only for semi-transparent
+			//      (opaque pixels block colour, only emission passes)
+			light = light * (1.0 - c.a) + e + c.rgb * (1.0 - c.a);
 
-			// Accumulate into scan (emission is now in light, so blend shader does NOT add e again)
+			// Accumulate into scan (blend shader does NOT re-add e)
 			vec4 prev = imageLoad(u_scan, ivec2(x, y));
 			imageStore(u_scan, ivec2(x, y), prev + vec4(light / float(u_ndirs), 0.0));
 		}
