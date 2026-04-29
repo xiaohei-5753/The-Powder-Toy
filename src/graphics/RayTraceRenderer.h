@@ -110,6 +110,7 @@ private:
 	GLuint renderTex_ = 0;
 	GLuint scanProg_ = 0;
 	GLuint blendProg_ = 0;
+	GLuint clearProg_ = 0;
 
 	// Async PBO readback (double buffering)
 	static constexpr int kNumPBOs = 2;

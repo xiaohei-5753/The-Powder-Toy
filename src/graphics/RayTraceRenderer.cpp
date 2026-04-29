@@ -79,6 +79,18 @@ void main() {
 }
 )";
 
+// Clear shader: zero-out the scan accumulation texture on GPU
+static const char *clearCompSrc = R"(#version 430 core
+layout(local_size_x = 8, local_size_y = 8) in;
+uniform ivec2 u_cs;
+layout(rgba16f, binding = 0) writeonly uniform image2D u_scan;
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (p.x >= u_cs.x || p.y >= u_cs.y) return;
+	imageStore(u_scan, p, vec4(0.0));
+}
+)";
+
 // Blend shader: combine scan light with pixel color + emission
 static const char *blendCompSrc = R"(#version 430 core
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -268,6 +280,26 @@ bool RayTraceRenderer::CompileShaders()
 	}
 	glDeleteShader(cs);
 
+	// Clear shader (GPU-side scan texture clear)
+	cs = CompileGLShader(clearCompSrc, GL_COMPUTE_SHADER);
+	if (!cs) return false;
+	clearProg_ = glCreateProgram();
+	glAttachShader(clearProg_, cs);
+	glLinkProgram(clearProg_);
+	{
+		GLint ok = 0;
+		glGetProgramiv(clearProg_, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			char log[4096];
+			GLsizei len = 0;
+			glGetProgramInfoLog(clearProg_, sizeof(log), &len, log);
+			fprintf(stderr, "RayTraceRenderer: clear shader link error:\n%s\n", log);
+			return false;
+		}
+	}
+	glDeleteShader(cs);
+
 	// Blend shader (scan → final)
 	cs = CompileGLShader(blendCompSrc, GL_COMPUTE_SHADER);
 	if (!cs) return false;
@@ -295,6 +327,7 @@ void RayTraceRenderer::DestroyShaders()
 {
 	if (scanProg_)  { glDeleteProgram(scanProg_);  scanProg_ = 0; }
 	if (blendProg_) { glDeleteProgram(blendProg_); blendProg_ = 0; }
+	if (clearProg_) { glDeleteProgram(clearProg_); clearProg_ = 0; }
 }
 
 // ============================================================================
@@ -762,11 +795,12 @@ void RayTraceRenderer::Render()
 		params_.wallIntensity * 0.251f,
 	};
 
-	// Clear scan accumulation texture (half-float 0)
-	int N = W * H;
-	std::vector<unsigned short> zero(N * 4, 0);
-	glBindTexture(GL_TEXTURE_2D, cvsScanTex_);
-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_HALF_FLOAT, zero.data());
+	// Clear scan accumulation texture on GPU (no CPU upload)
+	glUseProgram(clearProg_);
+	glUniform2i(glGetUniformLocation(clearProg_, "u_cs"), W, H);
+	glBindImageTexture(0, cvsScanTex_, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+	glDispatchCompute((W + 7) / 8, (H + 7) / 8, 1);
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
 	// Generate direction families from Bresenham circle
 	std::vector<int> dirX, dirY;
@@ -790,7 +824,11 @@ void RayTraceRenderer::Render()
 	glUniform1i(glGetUniformLocation(scanProg_, "u_ndirs"), nDirs);
 	glBindImageTexture(0, cvsScanTex_, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
 
-	// Dispatch one direction family at a time
+	// Dispatch all direction families.
+	// No barrier between dispatches: addition is commutative and concurrent
+	// races (imageLoad→add→imageStore from different rays hitting the same pixel)
+	// exist within each dispatch anyway, so extra barriers don't prevent them.
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 	for (int d = 0; d < nDirs; d++) {
 		int dx = dirX[d], dy = dirY[d];
 		if (dx == 0 && dy == 0) continue;
@@ -798,8 +836,9 @@ void RayTraceRenderer::Render()
 		glUniform2i(glGetUniformLocation(scanProg_, "u_dir"), dx, dy);
 		glUniform1i(glGetUniformLocation(scanProg_, "u_rayCount"), rc);
 		glDispatchCompute((rc + 255) / 256, 1, 1);
-		glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 	}
+	// One barrier after ALL directions, before the blend shader reads the result
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
 	// Final blend: scan light → renderTex with color + emission
 	glUseProgram(blendProg_);
