@@ -304,7 +304,7 @@ static void EventProcess(const SDL_Event &event)
 	switch (event.type)
 	{
 	case SDL_QUIT:
-		if (ALLOW_QUIT && (engine.GetFastQuit() || engine.CloseWindow()))
+		if (ALLOW_QUIT)
 		{
 			engine.Exit();
 		}
