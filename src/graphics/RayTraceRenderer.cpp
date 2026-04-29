@@ -56,7 +56,10 @@ void main() {
 		if (x >= 0 && x < W && y >= 0 && y < H) {
 			vec4 c = texelFetch(u_cc, ivec2(x, y), 0);
 			vec3 e = texelFetch(u_cl, ivec2(x, y), 0).rgb;
-			light = light * (1.0 - c.a) + e;
+			// Carry both emission AND pixel colour forward.
+			// This makes semi-transparent particles (FILT) tint the light,
+			// and emissive particles contribute their glow.
+			light = light * (1.0 - c.a) + max(e, c.rgb);
 
 			vec4 prev = imageLoad(u_scan, ivec2(x, y));
 			imageStore(u_scan, ivec2(x, y), prev + vec4(light / float(u_ndirs), 0.0));
@@ -601,7 +604,8 @@ void RayTraceRenderer::BuildColorTexture(
 		// 2. Emission from temperature (hot solids like metal with PROP_HOT_GLOW)
 		if (p.temp > 500.0f && hasPixelMode)
 		{
-			float tempIntensity = std::min(1.0f, (p.temp - 500.0f) / 2500.0f);
+			// Scanline accumulates across directions, so lower per-source intensity
+			float tempIntensity = std::min(0.5f, (p.temp - 500.0f) / 2500.0f);
 			emissiveIntensity = std::max(emissiveIntensity, tempIntensity);
 			er = std::max(er, colr / 255.0f);
 			eg = std::max(eg, colg / 255.0f);
@@ -621,7 +625,7 @@ void RayTraceRenderer::BuildColorTexture(
 		// (BRAY, and other "fancy mode" particles that visually glow)
 		if (glowModeRaw && emissiveIntensity < 0.01f)
 		{
-			emissiveIntensity = 0.5f; // moderate default glow
+			emissiveIntensity = 0.15f; // moderate default glow (lower in scanline to avoid over-accumulation)
 			er = std::max(er, colr / 255.0f);
 			eg = std::max(eg, colg / 255.0f);
 			eb = std::max(eb, colb / 255.0f);
