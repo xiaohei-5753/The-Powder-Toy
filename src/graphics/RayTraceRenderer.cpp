@@ -91,12 +91,13 @@ void main() {
 }
 )";
 
-// Blend shader: combine scan light with pixel color + emission
+// Blend shader: combine scan light with pixel colour + emission
 static const char *blendCompSrc = R"(#version 430 core
 layout(local_size_x = 8, local_size_y = 8) in;
-uniform sampler2D u_cc;   // color
-uniform sampler2D u_cl;   // emission
+uniform sampler2D u_cc;   // colour
 uniform sampler2D u_scan; // accumulated scan light
+uniform sampler2D u_pr;   // previous frame (for temporal anti-flicker blend)
+uniform float u_tb;       // temporal blend factor (0 = no blend, 1 = full current)
 uniform ivec2 u_cs;
 layout(rgba8, binding = 0) writeonly uniform image2D u_out;
 
@@ -109,6 +110,11 @@ void main() {
 	vec3 result = mix(scan, c.rgb, c.a);
 	float ov = max(max(result.r, result.g), result.b);
 	if (ov > 1.0) result /= ov;
+	// Temporal anti-flicker blend
+	if (u_tb > 0.0) {
+		vec3 prev = texelFetch(u_pr, p, 0).rgb;
+		result = mix(prev, result, u_tb);
+	}
 	imageStore(u_out, p, vec4(result, 1.0));
 }
 )";
@@ -352,6 +358,11 @@ bool RayTraceRenderer::CreateTextures()
 	cvsEmissionTex_ = createTex(GL_RGB8,  GL_RGB,  GL_UNSIGNED_BYTE, width_, height_);
 	cvsOccuTex_     = createTex(GL_R8,    GL_RED,  GL_UNSIGNED_BYTE, width_, height_);
 	renderTex_      = createTex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, width_, height_);
+	prevFrameTex_   = createTex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, width_, height_);
+	// Init prev frame to black
+	std::vector<unsigned char> black((size_t)width_ * height_ * 4, 0);
+	glBindTexture(GL_TEXTURE_2D, prevFrameTex_);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_RGBA, GL_UNSIGNED_BYTE, black.data());
 	cvsScanTex_     = createTex(GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, width_, height_);
 
 	colorUpload_.resize((size_t)width_ * height_ * 4);
@@ -383,6 +394,7 @@ void RayTraceRenderer::DestroyTextures()
 	delTex(cvsEmissionTex_);
 	delTex(cvsOccuTex_);
 	delTex(renderTex_);
+	delTex(prevFrameTex_);
 	delTex(cvsScanTex_);
 	if (pbos_[0]) { glDeleteBuffers(kNumPBOs, pbos_); pbos_[0] = 0; }
 	curPbo_ = 0;
@@ -824,10 +836,10 @@ void RayTraceRenderer::Render()
 	glUniform1i(glGetUniformLocation(scanProg_, "u_ndirs"), nDirs);
 	glBindImageTexture(0, cvsScanTex_, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
 
-	// Dispatch all direction families.
-	// No barrier between dispatches: addition is commutative and concurrent
-	// races (imageLoad→add→imageStore from different rays hitting the same pixel)
-	// exist within each dispatch anyway, so extra barriers don't prevent them.
+	// Dispatch direction families with periodic barriers.
+	// A barrier every N directions prevents excessive racing on the scan
+	// texture (imageLoad→add→imageStore) which would otherwise cause flickering.
+	int batch = params_.barrierBatch;
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 	for (int d = 0; d < nDirs; d++) {
 		int dx = dirX[d], dy = dirY[d];
@@ -836,22 +848,34 @@ void RayTraceRenderer::Render()
 		glUniform2i(glGetUniformLocation(scanProg_, "u_dir"), dx, dy);
 		glUniform1i(glGetUniformLocation(scanProg_, "u_rayCount"), rc);
 		glDispatchCompute((rc + 255) / 256, 1, 1);
+		if (batch > 0 && ((d + 1) % batch) == 0) {
+			glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+		}
 	}
-	// One barrier after ALL directions, before the blend shader reads the result
+	// One final barrier before the blend shader reads the result
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 
-	// Final blend: scan light → renderTex with color + emission
+	// Final blend: scan light → renderTex with color + temporal blend
 	glUseProgram(blendProg_);
 	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, cvsColorTex_);
 	glUniform1i(glGetUniformLocation(blendProg_, "u_cc"), 0);
-	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, cvsEmissionTex_);
-	glUniform1i(glGetUniformLocation(blendProg_, "u_cl"), 1);
-	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, cvsScanTex_);
-	glUniform1i(glGetUniformLocation(blendProg_, "u_scan"), 2);
+	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, cvsScanTex_);
+	glUniform1i(glGetUniformLocation(blendProg_, "u_scan"), 1);
+	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, prevFrameTex_);
+	glUniform1i(glGetUniformLocation(blendProg_, "u_pr"), 2);
+	glUniform1f(glGetUniformLocation(blendProg_, "u_tb"), params_.temporalBlend);
 	glUniform2i(glGetUniformLocation(blendProg_, "u_cs"), W, H);
 	glBindImageTexture(0, renderTex_, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 	glDispatchCompute((W + 7) / 8, (H + 7) / 8, 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	// Copy to prev frame for next frame's temporal blend
+	if (params_.temporalBlend > 0.0f)
+	{
+		glCopyImageSubData(renderTex_, GL_TEXTURE_2D, 0, 0, 0, 0,
+		                   prevFrameTex_, GL_TEXTURE_2D, 0, 0, 0, 0,
+		                   W, H, 1);
+	}
 }
 
 // ============================================================================

@@ -30,6 +30,12 @@ struct RayTraceParams
 	// Performance: only ray trace every N frames (1 = every frame)
 	int frameSkip = 2;
 
+	// Barrier batch: barrier every N direction families (0 = no barriers, higher = faster but more racing flicker)
+	int barrierBatch = 16;
+
+	// Temporal anti-flicker: blend current frame with previous (0 = off, 0.3 = 30% current, smooth)
+	float temporalBlend = 0.0f;
+
 	// Fire glow → emission mapping
 	float fireGlowScale  = 1.0f;
 };
@@ -108,6 +114,7 @@ private:
 	GLuint cvsOccuTex_ = 0;
 	GLuint cvsScanTex_ = 0; // float16 accumulation buffer (scanline)
 	GLuint renderTex_ = 0;
+	GLuint prevFrameTex_ = 0; // previous frame output (temporal blend)
 	GLuint scanProg_ = 0;
 	GLuint blendProg_ = 0;
 	GLuint clearProg_ = 0;
