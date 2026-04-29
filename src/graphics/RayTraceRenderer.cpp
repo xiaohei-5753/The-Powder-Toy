@@ -12,134 +12,92 @@
 #include <SDL.h>
 
 // ============================================================================
-// Compute shader — ported from easy_renderer
+// Scanline light propagation shader — ported from easy_renderer v2
+// Each work item = one Bresenham ray from canvas boundary, carrying ambient light
 // ============================================================================
 
-static const char *rayCompSrc = R"(#version 430 core
-layout(local_size_x = 8, local_size_y = 8) in;
+static const char *scanCompSrc = R"(#version 430 core
+layout(local_size_x = 256) in;
+uniform sampler2D u_cc;   // color
+uniform sampler2D u_cl;   // emission
+uniform ivec2 u_dir;      // direction vector (dx, dy) for this ray family
+uniform ivec2 u_cs;       // canvas size
+uniform vec3  u_ambient;  // ambient wall light
+uniform int   u_rayCount; // number of parallel rays in this dispatch
+uniform int   u_ndirs;    // total direction families (for normalization)
+layout(rgba16f, binding = 0) uniform image2D u_scan; // accumulation (read+write)
 
-uniform sampler2D u_cc;
-uniform sampler2D u_cl;
-uniform sampler2D u_occ;
-uniform vec2  u_sd;
-uniform float u_ss;
-uniform vec3  u_sl;
-uniform vec3  u_wl;
-uniform int   u_cr;
-uniform ivec2 u_cs;
-uniform float u_ep;
+void main() {
+	int rayId = int(gl_GlobalInvocationID.x);
+	if (rayId >= u_rayCount) return;
 
-layout(rgba8, binding = 0) writeonly uniform image2D u_out;
+	int dx = abs(u_dir.x), dy = abs(u_dir.y);
+	int sx = (u_dir.x >= 0) ? 1 : -1, sy = (u_dir.y >= 0) ? 1 : -1;
+	int W = u_cs.x, H = u_cs.y;
 
-bool isEmptyRegion(ivec2 p) {
-	float occ = texelFetch(u_occ, p, 0).r;
-	return occ < 0.5;
-}
+	// Entry point on canvas boundary
+	int x = 0, y = 0, r = rayId;
+	if (dx == 0) {
+		if (sy > 0) { x = r; y = 0;     }
+		else        { x = r; y = H - 1; }
+	} else if (dy == 0) {
+		if (sx > 0) { x = 0;     y = r; }
+		else        { x = W - 1; y = r; }
+	} else if (dx >= dy) {
+		if (r < H) { x = sx > 0 ? 0 : W - 1; y = r; }
+		else       { x = r - H; y = sy > 0 ? 0 : H - 1; }
+	} else {
+		if (r < W) { x = r; y = sy > 0 ? 0 : H - 1; }
+		else       { x = sx > 0 ? 0 : W - 1; y = r - W; }
+	}
 
-vec3 cR(ivec2 o, ivec2 d) {
-	vec3 light = vec3(0.0);
-	float trans = 1.0;
-	int dx = abs(d.x), dy = abs(d.y);
-	int sx = (d.x >= 0) ? 1 : -1, sy = (d.y >= 0) ? 1 : -1;
-	int er = dx - dy, x = o.x, y = o.y;
-	int e2 = 2 * er;
+	vec3 light = u_ambient;
+	int er = dx - dy, e2 = 2 * er;
 	if (e2 > -dy) { er -= dy; x += sx; }
 	if (e2 <  dx) { er += dx; y += sy; }
-	while (true) {
-		if (x < 0 || x >= u_cs.x || y < 0 || y >= u_cs.y) {
-			vec2 dn = normalize(vec2(d));
-			if (1.0 - dot(dn, u_sd) <= u_ss)
-				light += trans * u_sl;
-			else
-				light += trans * u_wl;
-			return light;
-		}
-		if (isEmptyRegion(ivec2(x, y))) {
-			for (int s = 0; s < 4; s++) {
-				e2 = 2 * er;
-				if (e2 > -dy) { er -= dy; x += sx; }
-				if (e2 <  dx) { er += dx; y += sy; }
-				if (x < 0 || x >= u_cs.x || y < 0 || y >= u_cs.y) break;
-				if (!isEmptyRegion(ivec2(x, y))) break;
-			}
-			continue;
-		}
+
+	while (x >= 0 && x < W && y >= 0 && y < H) {
 		vec4 c = texelFetch(u_cc, ivec2(x, y), 0);
-		vec3 ref = texelFetch(u_cl, ivec2(x, y), 0).rgb;
-		if (c.a >= 1.0) {
-			light += trans * ref;
-			return light;
-		}
-		if (c.a > 0.0) {
-			// Add both emission AND pixel colour to the passing light.
-			// This makes semi-transparent particles (like FILT) tint
-			// the light that passes through them.
-			light += trans * max(ref, c.rgb) * c.a;
-			trans *= (1.0 - c.a);
-			if (trans < u_ep) return light;
-		}
+		vec3 e = texelFetch(u_cl, ivec2(x, y), 0).rgb;
+
+		// Forward light: absorb by (1-alpha), add emission
+		light = light * (1.0 - c.a) + e;
+
+		// Accumulate (normalised by direction count)
+		vec4 prev = imageLoad(u_scan, ivec2(x, y));
+		imageStore(u_scan, ivec2(x, y), prev + vec4(light / float(u_ndirs), 0.0));
+
 		e2 = 2 * er;
 		if (e2 > -dy) { er -= dy; x += sx; }
 		if (e2 <  dx) { er += dx; y += sy; }
 	}
 }
+)";
+
+// Blend shader: combine scan light with pixel color + emission
+static const char *blendCompSrc = R"(#version 430 core
+layout(local_size_x = 8, local_size_y = 8) in;
+uniform sampler2D u_cc;   // color
+uniform sampler2D u_cl;   // emission
+uniform sampler2D u_scan; // accumulated scan light
+uniform ivec2 u_cs;
+layout(rgba8, binding = 0) writeonly uniform image2D u_out;
 
 void main() {
 	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 	if (p.x >= u_cs.x || p.y >= u_cs.y) return;
-
 	vec4 c = texelFetch(u_cc, p, 0);
-	if (c.a >= 1.0) {
-		imageStore(u_out, p, c);
-		return;
-	}
-	vec3 a = vec3(0.0);
-	int cnt = 0, r = u_cr, m = 1 - r, x = 0, y = r;
-	while (x < y) {
-		a += cR(p, ivec2( x,  y)); cnt++;
-		a += cR(p, ivec2(-x,  y)); cnt++;
-		a += cR(p, ivec2( x, -y)); cnt++;
-		a += cR(p, ivec2(-x, -y)); cnt++;
-		a += cR(p, ivec2( y,  x)); cnt++;
-		a += cR(p, ivec2(-y,  x)); cnt++;
-		a += cR(p, ivec2( y, -x)); cnt++;
-		a += cR(p, ivec2(-y, -x)); cnt++;
-		x++;
-		if (m < 0)
-			m += 2 * x + 1;
-		else {
-			y--;
-			m += 2 * (x - y) + 1;
-		}
-	}
-	a /= float(cnt);
-	vec3 selfLight = texelFetch(u_cl, p, 0).rgb;
-	a += selfLight;
-	a = max(a, vec3(0.0));
-	float ov = max(max(a.r, a.g), a.b);
-	if (ov > 1.0) a /= ov;
-	imageStore(u_out, p, vec4(mix(a, c.rgb, c.a), 1.0));
+	if (c.a >= 1.0) { imageStore(u_out, p, c); return; }
+	vec3 e    = texelFetch(u_cl, p, 0).rgb;
+	vec3 scan = texelFetch(u_scan, p, 0).rgb;
+	vec3 result = mix(scan, c.rgb, c.a) + e;
+	float ov = max(max(result.r, result.g), result.b);
+	if (ov > 1.0) result /= ov;
+	imageStore(u_out, p, vec4(result, 1.0));
 }
 )";
 
-static const char *dispVertSrc = R"(#version 330 core
-layout(location = 0) in vec2 aP;
-layout(location = 1) in vec2 aU;
-out vec2 vU;
-void main() {
-	gl_Position = vec4(aP, 0.0, 1.0);
-	vU = aU;
-}
-)";
 
-static const char *dispFragSrc = R"(#version 330 core
-uniform sampler2D u_t;
-in vec2 vU;
-out vec4 oC;
-void main() {
-	oC = texture(u_t, vU);
-}
-)";
 
 // ============================================================================
 // RayTraceRenderer Implementation
@@ -286,39 +244,53 @@ static GLuint LinkGLProgram(GLuint vs, GLuint fs)
 
 bool RayTraceRenderer::CompileShaders()
 {
-	GLuint cs = CompileGLShader(rayCompSrc, GL_COMPUTE_SHADER);
+	// Scanline light propagation shader
+	GLuint cs = CompileGLShader(scanCompSrc, GL_COMPUTE_SHADER);
 	if (!cs) return false;
-	rayProg_ = glCreateProgram();
-	glAttachShader(rayProg_, cs);
-	glLinkProgram(rayProg_);
+	scanProg_ = glCreateProgram();
+	glAttachShader(scanProg_, cs);
+	glLinkProgram(scanProg_);
 	{
 		GLint ok = 0;
-		glGetProgramiv(rayProg_, GL_LINK_STATUS, &ok);
+		glGetProgramiv(scanProg_, GL_LINK_STATUS, &ok);
 		if (!ok)
 		{
 			char log[4096];
 			GLsizei len = 0;
-			glGetProgramInfoLog(rayProg_, sizeof(log), &len, log);
-			fprintf(stderr, "RayTraceRenderer: compute shader link error:\n%s\n", log);
+			glGetProgramInfoLog(scanProg_, sizeof(log), &len, log);
+			fprintf(stderr, "RayTraceRenderer: scan shader link error:\n%s\n", log);
 			return false;
 		}
 	}
 	glDeleteShader(cs);
 
-	GLuint dvs = CompileGLShader(dispVertSrc, GL_VERTEX_SHADER);
-	GLuint dfs = CompileGLShader(dispFragSrc, GL_FRAGMENT_SHADER);
-	if (!dvs || !dfs) return false;
-	dispProg_ = LinkGLProgram(dvs, dfs);
-	glDeleteShader(dvs);
-	glDeleteShader(dfs);
+	// Blend shader (scan → final)
+	cs = CompileGLShader(blendCompSrc, GL_COMPUTE_SHADER);
+	if (!cs) return false;
+	blendProg_ = glCreateProgram();
+	glAttachShader(blendProg_, cs);
+	glLinkProgram(blendProg_);
+	{
+		GLint ok = 0;
+		glGetProgramiv(blendProg_, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			char log[4096];
+			GLsizei len = 0;
+			glGetProgramInfoLog(blendProg_, sizeof(log), &len, log);
+			fprintf(stderr, "RayTraceRenderer: blend shader link error:\n%s\n", log);
+			return false;
+		}
+	}
+	glDeleteShader(cs);
 
 	return true;
 }
 
 void RayTraceRenderer::DestroyShaders()
 {
-	if (rayProg_) { glDeleteProgram(rayProg_); rayProg_ = 0; }
-	if (dispProg_) { glDeleteProgram(dispProg_); dispProg_ = 0; }
+	if (scanProg_)  { glDeleteProgram(scanProg_);  scanProg_ = 0; }
+	if (blendProg_) { glDeleteProgram(blendProg_); blendProg_ = 0; }
 }
 
 // ============================================================================
@@ -343,23 +315,16 @@ bool RayTraceRenderer::CreateTextures()
 	cvsEmissionTex_ = createTex(GL_RGB8,  GL_RGB,  GL_UNSIGNED_BYTE, width_, height_);
 	cvsOccuTex_     = createTex(GL_R8,    GL_RED,  GL_UNSIGNED_BYTE, width_, height_);
 	renderTex_      = createTex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, width_, height_);
+	cvsScanTex_     = createTex(GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, width_, height_);
 
 	colorUpload_.resize((size_t)width_ * height_ * 4);
 	emissionUpload_.resize((size_t)width_ * height_ * 3);
 	occUpload_.resize((size_t)width_ * height_);
 
-	float verts[] = { -1, -1, 0, 0, 3, -1, 2, 0, -1, 3, 0, 2 };
-	glGenVertexArrays(1, &fullVAO_);
-	glBindVertexArray(fullVAO_);
-	GLuint vbo;
-	glGenBuffers(1, &vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
-	glBindVertexArray(0);
+	// Clear scan texture to black on first frame
+	std::vector<unsigned short> zero((size_t)width_ * height_ * 4, 0);
+	glBindTexture(GL_TEXTURE_2D, cvsScanTex_);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_RGBA, GL_HALF_FLOAT, zero.data());
 
 	// Create PBOs for async readback
 	size_t pboSize = (size_t)width_ * height_ * 4;
@@ -381,7 +346,7 @@ void RayTraceRenderer::DestroyTextures()
 	delTex(cvsEmissionTex_);
 	delTex(cvsOccuTex_);
 	delTex(renderTex_);
-	if (fullVAO_) { glDeleteVertexArrays(1, &fullVAO_); fullVAO_ = 0; }
+	delTex(cvsScanTex_);
 	if (pbos_[0]) { glDeleteBuffers(kNumPBOs, pbos_); pbos_[0] = 0; }
 	curPbo_ = 0;
 	pboReady_ = false;
@@ -775,7 +740,7 @@ void RayTraceRenderer::BuildOccupancyTexture(const RenderableSimulation &sim)
 }
 
 // ============================================================================
-// Ray Tracing Dispatch
+// Scanline Light Propagation (replaces per-pixel ray tracing)
 // ============================================================================
 
 void RayTraceRenderer::Render()
@@ -783,47 +748,67 @@ void RayTraceRenderer::Render()
 	if (!initialized_ || !enabled_)
 		return;
 
-	float sunDirX = 0.7071f;
-	float sunDirY = 0.7071f;
-	float sunSc = params_.sunSpread;
-	float eps = 1e-3f;
+	int W = width_, H = height_;
+	int R = params_.circleRadius;
 
-	float sl[3] = {
-		params_.sunIntensity * 10.0f,
-		params_.sunIntensity * 9.0f,
-		params_.sunIntensity * 7.0f,
-	};
-	float wl[3] = {
+	// Ambient wall light = RGB(64,64,64) scaled
+	float wc[3] = {
 		params_.wallIntensity * 0.251f,
 		params_.wallIntensity * 0.251f,
 		params_.wallIntensity * 0.251f,
 	};
 
+	// Clear scan accumulation texture (half-float 0)
+	int N = W * H;
+	std::vector<unsigned short> zero(N * 4, 0);
+	glBindTexture(GL_TEXTURE_2D, cvsScanTex_);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_HALF_FLOAT, zero.data());
+
+	// Generate direction families from Bresenham circle
+	std::vector<int> dirX, dirY;
+	int m = 1 - R, cx = 0, cy = R;
+	while (cx < cy) {
+		dirX.insert(dirX.end(), { cx, -cx,  cx, -cx,  cy, -cy,  cy, -cy });
+		dirY.insert(dirY.end(), { cy,  cy, -cy, -cy,  cx,  cx, -cx, -cx });
+		cx++;
+		if (m < 0) m += 2 * cx + 1; else { cy--; m += 2 * (cx - cy) + 1; }
+	}
+	int nDirs = (int)dirX.size();
+
+	// Bind scanline shader once
+	glUseProgram(scanProg_);
+	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, cvsColorTex_);
+	glUniform1i(glGetUniformLocation(scanProg_, "u_cc"), 0);
+	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, cvsEmissionTex_);
+	glUniform1i(glGetUniformLocation(scanProg_, "u_cl"), 1);
+	glUniform2i(glGetUniformLocation(scanProg_, "u_cs"), W, H);
+	glBindImageTexture(0, cvsScanTex_, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
+
+	// Dispatch one direction family at a time
+	int nRays = W + H;
+	for (int d = 0; d < nDirs; d++) {
+		int dx = dirX[d], dy = dirY[d];
+		if (dx == 0 && dy == 0) continue;
+		glUniform2i(glGetUniformLocation(scanProg_, "u_dir"), dx, dy);
+		glUniform3fv(glGetUniformLocation(scanProg_, "u_ambient"), 1, wc);
+		glUniform1i(glGetUniformLocation(scanProg_, "u_rayCount"), nRays);
+		glUniform1i(glGetUniformLocation(scanProg_, "u_ndirs"), nDirs);
+		glDispatchCompute((nRays + 255) / 256, 1, 1);
+		glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+	}
+
+	// Final blend: scan light → renderTex with color + emission
+	glUseProgram(blendProg_);
+	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, cvsColorTex_);
+	glUniform1i(glGetUniformLocation(blendProg_, "u_cc"), 0);
+	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, cvsEmissionTex_);
+	glUniform1i(glGetUniformLocation(blendProg_, "u_cl"), 1);
+	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, cvsScanTex_);
+	glUniform1i(glGetUniformLocation(blendProg_, "u_scan"), 2);
+	glUniform2i(glGetUniformLocation(blendProg_, "u_cs"), W, H);
 	glBindImageTexture(0, renderTex_, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
-	glUseProgram(rayProg_);
-
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, cvsColorTex_);
-	glUniform1i(glGetUniformLocation(rayProg_, "u_cc"), 0);
-
-	glActiveTexture(GL_TEXTURE1);
-	glBindTexture(GL_TEXTURE_2D, cvsEmissionTex_);
-	glUniform1i(glGetUniformLocation(rayProg_, "u_cl"), 1);
-
-	glActiveTexture(GL_TEXTURE2);
-	glBindTexture(GL_TEXTURE_2D, cvsOccuTex_);
-	glUniform1i(glGetUniformLocation(rayProg_, "u_occ"), 2);
-
-	glUniform2f(glGetUniformLocation(rayProg_, "u_sd"), sunDirX, sunDirY);
-	glUniform1f(glGetUniformLocation(rayProg_, "u_ss"), sunSc);
-	glUniform3fv(glGetUniformLocation(rayProg_, "u_sl"), 1, sl);
-	glUniform3fv(glGetUniformLocation(rayProg_, "u_wl"), 1, wl);
-	glUniform1i(glGetUniformLocation(rayProg_, "u_cr"), params_.circleRadius);
-	glUniform2i(glGetUniformLocation(rayProg_, "u_cs"), width_, height_);
-	glUniform1f(glGetUniformLocation(rayProg_, "u_ep"), eps);
-
-	glDispatchCompute((width_ + 7) / 8, (height_ + 7) / 8, 1);
-	glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+	glDispatchCompute((W + 7) / 8, (H + 7) / 8, 1);
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 }
 
 // ============================================================================

@@ -106,10 +106,10 @@ private:
 	GLuint cvsColorTex_ = 0;
 	GLuint cvsEmissionTex_ = 0;
 	GLuint cvsOccuTex_ = 0;
+	GLuint cvsScanTex_ = 0; // float16 accumulation buffer (scanline)
 	GLuint renderTex_ = 0;
-	GLuint rayProg_ = 0;
-	GLuint dispProg_ = 0;
-	GLuint fullVAO_ = 0;
+	GLuint scanProg_ = 0;
+	GLuint blendProg_ = 0;
 
 	// Async PBO readback (double buffering)
 	static constexpr int kNumPBOs = 2;
